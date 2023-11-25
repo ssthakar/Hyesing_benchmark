@@ -1,0 +1,7 @@
+Mo          0.0001
+epsilon     0.01
+sigma0      1.96
+rhoL        1000
+muL         10 
+rhoG        1 
+muG         0.1
