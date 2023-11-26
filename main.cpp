@@ -168,7 +168,6 @@ int main(int argc,char * argv[])
   
   //- start profile clock
   auto start_time = std::chrono::high_resolution_clock::now();
-  // mesh.update(0);
   //- epoch loop
   while(iter<=mesh.net_->K_EPOCH)
   {
@@ -182,11 +181,8 @@ int main(int argc,char * argv[])
         optim.zero_grad();
         //- generate solution fields from forward pass, accumulate gradients
         mesh.update(i);
-        // std::cout<<mesh.pdeIndices_.sizes()<<"\n";
-        // std::cout<<mesh.iPDE_.sizes()<<"\n";
-        //- get total loss for the optimizer (PDE IC BC)
+        //- get total loss for the optimizer (PDE,IC,BC)
         auto loss = CahnHillard::loss(mesh);
-        // auto loss = Heat::loss(mesh);
         //- back propogate
         loss.backward();
         //- update network parameters
@@ -198,6 +194,7 @@ int main(int argc,char * argv[])
       return totalLoss/mesh.net_->NITER_;
     };
     std::cout<<iter<<"\n";
+    
     //- change learning rate 
     if (iter <= 1000)
     {
@@ -213,6 +210,7 @@ int main(int argc,char * argv[])
     }
 
     //- info out to terminal
+    //- does not work on the cluster for some reason, rely on the loss.txt for info
     if (iter % 10 == 0) 
     {
       std::cout << "  iter=" << iter << ", loss=" << std::setprecision(7) << loss<<" lr: "<<adam_optim1.defaults().get_lr()<<"\n";
@@ -223,27 +221,27 @@ int main(int argc,char * argv[])
     if (loss < mesh.net_->ABS_TOL) 
     {
       //- save model to file for post processing
-      // torch::save(net,"saved_model.pt");
+      torch::save(mesh.net_,"saved_model.pt");
       //- update iter to get correct iter count
       iter += 1;
       //- update netPrev_ field in the mesh class instance
       // loadState(mesh.net_,mesh.netPrev_);
       std::cout<<iter<<std::endl;
-      // break;
+      break;
 	  }
     iter += 1;
   }
-  torch::Tensor test =torch::slice(mesh.pdeIndices_,0,4000,5000);
-  // std::cout<<test<<"\n";
-  //- stuff for profiling
+  
+  //- end profile clock
   auto end_time = std::chrono::high_resolution_clock::now();
-
+  
+  //- get runTime for traning
   auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-
+ 
+  //- info out runTime
   std::cout << "Execution time: " << duration.count() << " microseconds" << std::endl;
   
-  //- for plotting
-  /*
+  //- for plotting final timeStep
   mesh.iIC_ = torch::stack
   (
     {
@@ -253,37 +251,13 @@ int main(int argc,char * argv[])
       torch::flatten(mesh.mesh_[2])
     },1
   );
-  */
-  // torch::Tensor C1 = mesh.net_->forward(mesh.iIC_);
   
-  writeTensorToFile(mesh.iPDE_,"randomSample.txt");
-  // writeTensorToFile(C1,"initial1.txt"); 
-  // std::cout<<mesh.thermo_.Mo;
-  /*
-  // loadState(net2,mesh1.net_);
-  torch::Tensor xy = torch::stack({mesh.xyGrid[0].flatten(),mesh.xyGrid[1].flatten()},1);
-  torch::Tensor uFinal = mesh.net_->forward(xy);
-  writeTensorToFile(xy, "output23.txt");
-  writeTensorToFile(uFinal, "output.txt");
-  //-
-  torch::Tensor yValues = torch::arange(0, 1.005, 0.005,device);
-
-  // Repeat the x value (0.5) for each y value
-  torch::Tensor xValues = torch::full_like(yValues, 0.75,device);
-
-  // Create a 2D tensor by stacking x and y values
-  torch::Tensor tensor2D = torch::stack({xValues, yValues}, 1);
-
-  // PinNet netPost;
-  // torch::load(netPost,"saved_model.pt");
-  torch::Tensor test = mesh.net_->forward(tensor2D);
-  writeTensorToFile(test, "test.txt");
-  writeTensorToFile(tensor2D, "testXY.txt");
+  //- get predicted output, and from that get phaseField 
+  torch::Tensor C1 = mesh.net_->forward(mesh.iIC_).index({Slice(),3});
   
-
-  */
-
- 
+  //- write out input data for python to plot
+  writeTensorToFile(mesh.iIC_,"grid.txt");
+  writeTensorToFile(C1,"phaseField.txt"); 
   
   return 0;
 
