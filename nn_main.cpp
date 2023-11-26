@@ -61,10 +61,11 @@ void PinNetImpl::create_layers()
     (
       register_module
       (
-        "fc_relu_hidden" + std::to_string(i), 
-        torch::nn::SiLU()
+        "fc_silu_hidden" + std::to_string(i), 
+        torch::nn::SiLU() // swish function X * RELU(X)
       )
     );
+    //- why ????
     /*
     hidden_layers->push_back
     (
@@ -230,7 +231,7 @@ torch::Tensor CahnHillard::L_Mass2D
   const torch::Tensor &u = mesh.fieldsPDE_.index({Slice(),0});
   const torch::Tensor &v = mesh.fieldsPDE_.index({Slice(),1});
   torch::Tensor du_dx = d_d1(u,mesh.iPDE_,0);
-  torch::Tensor dv_dy = d_d1(u,mesh.iPDE_,1);
+  torch::Tensor dv_dy = d_d1(v,mesh.iPDE_,1);
   torch::Tensor loss = du_dx + dv_dy;
   return torch::mse_loss(loss, torch::zeros_like(loss));
 }
@@ -271,7 +272,7 @@ torch::Tensor CahnHillard::CahnHillard2D
   torch::Tensor dphi_dyy = d_dn(phi,mesh.iPDE_,2,1);
   //- loss term
   torch::Tensor loss = dC_dt + u*dC_dx + v*dC_dy - 
-    Mo*(dphi_dyy + dphi_dyy);
+    Mo*(dphi_dxx + dphi_dyy);
   return torch::mse_loss(loss,torch::zeros_like(loss));
 }
 
@@ -406,14 +407,14 @@ torch::Tensor CahnHillard::BCloss(mesh2D &mesh)
   torch::Tensor Cbottom = mesh.fieldsBottom_.index({Slice(),3});
   
   //- total boundary loss for u, v and C
-  torch::Tensor lossLeft = CahnHillard::slipWall(mesh.fieldsLeft_, mesh.iLeftWall_,0) 
-       + CahnHillard::zeroGrad(Cleft, mesh.iLeftWall_, 0);
-  torch::Tensor lossRight = CahnHillard::slipWall(mesh.fieldsRight_,mesh.iRightWall_, 0)
-       + CahnHillard::zeroGrad(Cright, mesh.iRightWall_, 0);
-  torch::Tensor lossTop = CahnHillard::noSlipWall(mesh.fieldsTop_, mesh.iTopWall_)
-       + CahnHillard::zeroGrad(Ctop, mesh.iTopWall_, 1);
-  torch::Tensor lossBottom = CahnHillard::noSlipWall(mesh.fieldsBottom_, mesh.iBottomWall_)
-       + CahnHillard::zeroGrad(Cbottom, mesh.iBottomWall_, 1);
+  torch::Tensor lossLeft = CahnHillard::slipWall(mesh.fieldsLeft_, mesh.iLeftWall_,0); 
+       //+ CahnHillard::zeroGrad(Cleft, mesh.iLeftWall_, 0);
+  torch::Tensor lossRight = CahnHillard::slipWall(mesh.fieldsRight_,mesh.iRightWall_, 0);
+       //+ CahnHillard::zeroGrad(Cright, mesh.iRightWall_, 0);
+  torch::Tensor lossTop = CahnHillard::noSlipWall(mesh.fieldsTop_, mesh.iTopWall_);
+       //+ CahnHillard::zeroGrad(Ctop, mesh.iTopWall_, 1);
+  torch::Tensor lossBottom = CahnHillard::noSlipWall(mesh.fieldsBottom_, mesh.iBottomWall_);
+       //+ CahnHillard::zeroGrad(Cbottom, mesh.iBottomWall_, 1);
   return lossLeft + lossRight + lossTop + lossBottom;
 }
 
