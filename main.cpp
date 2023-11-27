@@ -103,7 +103,10 @@ void writeTensorToFile(torch::Tensor& tensor, torch::Tensor& additionalTensor, c
 //- main 
 int main(int argc,char * argv[])
 {
-  
+  Dictionary debugDict = Dictionary("../debug.txt");
+  bool debug = debugDict.get<bool>("DEBUG");
+  if(debug)
+    std::cout<<"debug is: "<<debug<<"\n";
   // check if CUDA is avalilable and train on GPU if yes
   auto cuda_available = torch::cuda::is_available();
   auto device_str = cuda_available ? torch::kCUDA : torch::kCPU;
@@ -124,7 +127,6 @@ int main(int argc,char * argv[])
   //- load nets to device if available
   net1->to(device);
   net2->to(device);
-  
   //- create dict for mesh
   Dictionary meshDict = Dictionary("../mesh.txt");
   //- create dict for thermoPhysical class
@@ -137,7 +139,7 @@ int main(int argc,char * argv[])
   // std::cout<<testLoss<<"\n";
   
   //- code to save initial condition for the phase field variable 
-  mesh.iIC_ = torch::stack
+  /*mesh.iIC_ = torch::stack
   (
     {
       torch::flatten(mesh.initialGrid_[0]),
@@ -145,17 +147,26 @@ int main(int argc,char * argv[])
       torch::flatten(mesh.initialGrid_[2])
     },1
   );
+  */
 
-  writeTensorToFile(mesh.iIC_,"total.txt");
-  torch::Tensor C = CahnHillard::C_at_InitialTime(mesh);
-  writeTensorToFile(C,"intial.txt");
+  // writeTensorToFile(mesh.iIC_,"total.txt");
+  // torch::Tensor C = CahnHillard::C_at_InitialTime(mesh);
+  // writeTensorToFile(C,"intial.txt");
+    
+  if(debug)
+  { 
+    mesh.update(0);
+    mesh.update(1);
+    std::cout<<mesh.fieldsPDE_<<std::endl;
+  }
 
 
+  //- TODO intialize optim paras from dictionary to avoid recompilation 
   //- declare optimizer instance to be used in training
   //- learning rate is decreased over the traning process and the optimizer class instance is changed
-  torch::optim::Adam adam_optim1(mesh.net_->parameters(), torch::optim::AdamOptions(1e-4));  
-  torch::optim::Adam adam_optim2(mesh.net_->parameters(), torch::optim::AdamOptions(1e-5)); 
-  torch::optim::Adam adam_optim3(mesh.net_->parameters(), torch::optim::AdamOptions(1e-6));
+  torch::optim::Adam adam_optim1(mesh.net_->parameters(), torch::optim::AdamOptions(1e-3));  
+  torch::optim::Adam adam_optim2(mesh.net_->parameters(), torch::optim::AdamOptions(1e-4)); 
+  torch::optim::Adam adam_optim3(mesh.net_->parameters(), torch::optim::AdamOptions(1e-5));
 
 
   //- trainig begins here
@@ -220,8 +231,8 @@ int main(int argc,char * argv[])
     //- stop training if target loss achieved
     if (loss < mesh.net_->ABS_TOL) 
     {
-      //- save model to file for post processing
-      torch::save(mesh.net_,"saved_model.pt");
+      //- save model to file for post processing, indicate saved model is due to convergence
+      torch::save(mesh.net_,"saved_moded_Converged.pt");
       //- update iter to get correct iter count
       iter += 1;
       //- update netPrev_ field in the mesh class instance
@@ -231,7 +242,8 @@ int main(int argc,char * argv[])
 	  }
     iter += 1;
   }
-  
+  //- indicate saved model is a result of max iters running out
+  torch::save(mesh.net_,"saved_model_maxIter.pt");
   //- end profile clock
   auto end_time = std::chrono::high_resolution_clock::now();
   
@@ -241,19 +253,21 @@ int main(int argc,char * argv[])
   //- info out runTime
   std::cout << "Execution time: " << duration.count() << " microseconds" << std::endl;
   
+  
+
   //- for plotting final timeStep
-  mesh.iIC_ = torch::stack
+  torch::Tensor grid = torch::stack
   (
     {
       torch::flatten(mesh.mesh_[0]),
       torch::flatten(mesh.mesh_[1]),
-      // torch::full_like(torch::flatten(mesh.mesh_[2]),0.1)
-      torch::flatten(mesh.mesh_[2])
+      torch::full_like(torch::flatten(mesh.mesh_[2]),0.5)
+      // torch::flatten(mesh.mesh_[2])
     },1
   );
   
-  //- get predicted output, and from that get phaseField 
-  torch::Tensor C1 = mesh.net_->forward(mesh.iIC_).index({Slice(),3});
+  //- get predicted output u,v,p and C 
+  torch::Tensor C1 = mesh.net_->forward(mesh.iIC_);
   
   //- write out input data for python to plot
   writeTensorToFile(mesh.iIC_,"grid.txt");

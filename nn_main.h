@@ -248,6 +248,7 @@ class mesh2D :
     );
     //- update time parameters for next time interval
     void updateMesh();
+    void getOutputMesh();
 };
 
 

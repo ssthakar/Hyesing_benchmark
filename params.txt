@@ -4,8 +4,8 @@ nHiddenLayer      10
 outputDim         4
 NEQN              2000
 NBC               50
-NIC               500
+NIC               300
 transient         1
-KEPOCH            3000
-ABSTOL            1e-3
+KEPOCH            1
+ABSTOL            1e-4
 BATCHSIZE         1000

@@ -324,6 +324,7 @@ torch::Tensor CahnHillard::L_MomX2d
   torch::Tensor loss1 = rhoM*(du_dt + u*du_dx + v*du_dy) + dp_dx;
   torch::Tensor loss2 = -0.5*(muL - muG)*dC_dy*(du_dy + dv_dx) - (muL -muG)*dC_dx*du_dx;
   torch::Tensor loss3 = -muM*(du_dxx + du_dyy) - fx;
+  //- division by rhoL for normalization?
   torch::Tensor loss = (loss1 + loss2 + loss3)/rhoL;
   return torch::mse_loss(loss, torch::zeros_like(loss));
 }
@@ -463,8 +464,9 @@ torch::Tensor CahnHillard::C_at_InitialTime(mesh2D &mesh)
     
     return Ci;
   }
-  else 
+  else  
   {
+    //- use previous converged neural net as intial conditions
     torch::Tensor Ci = mesh.netPrev_->forward(mesh.iIC_).index({Slice(),3});
     return Ci;
   }
@@ -482,7 +484,7 @@ torch::Tensor CahnHillard::u_at_InitialTime(mesh2D &mesh)
     return mesh.netPrev_->forward(mesh.iIC_).index({Slice(),0});
   }
 }
-//-v
+//-v at intial time
 torch::Tensor CahnHillard::v_at_InitialTime(mesh2D &mesh)
 {
   if(mesh.lbT_ ==0)
@@ -690,7 +692,8 @@ void mesh2D::createTotalSamples
       pdeIndices_,
       0,
       iter*net_->BATCHSIZE,
-      (iter + 1)*net_->BATCHSIZE-1 // -1 to not have overlapping samples
+      (iter + 1)*net_->BATCHSIZE,
+      1 // step size when slicing
     );
     createSamples(xyGrid,iPDE_,batchIndices);
   }
@@ -700,7 +703,8 @@ void mesh2D::createTotalSamples
     (
       0,
       iter*net_->BATCHSIZE,
-      (iter + 1)*net_->BATCHSIZE-1 // -1 to not have overlapping samples
+      (iter + 1)*net_->BATCHSIZE,
+      1 // step size when slicing
     );
     createSamples(mesh_,iPDE_,batchIndices);
   }
@@ -709,7 +713,7 @@ void mesh2D::createTotalSamples
   {
     if(net_->transient_ == 1)
     {
-    //- update samples for intialGrid
+      //- update samples for intialGrid
       createSamples(initialGrid_,iIC_,net_->N_IC);
     }
     //- update samples for left wall 
@@ -750,12 +754,12 @@ void mesh2D::createIndices()
   if(net_->transient_==0)
   {
     pdeIndices_ = 
-      torch::randperm(xyGrid[0].numel(),device_).slice(0,0,net_->N_EQN);
+      torch::randperm(xyGrid[0].numel(),device_).slice(0,0,net_->N_EQN,1);
   }
   else
   {
     pdeIndices_ = 
-      torch::randperm(mesh_[0].numel(),device_).slice(0,0,net_->N_EQN);
+      torch::randperm(mesh_[0].numel(),device_).slice(0,0,net_->N_EQN,1);
     
   }
 }

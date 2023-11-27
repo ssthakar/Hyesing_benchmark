@@ -106,6 +106,7 @@ void writeOut(std::string fileName, std::vector<std::vector<T>> vec,const char d
   }
 }
 
+//- unorderd mem map to load in parameters needed in the training without recompling
 class Dictionary 
 {
   public:
@@ -166,6 +167,7 @@ private:
     std::map<std::string, std::string> data;
 };
 
+//- TODO include matplotlib functionality here for plotting stuff
 
 
 
