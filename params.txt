@@ -1,11 +1,11 @@
 inputDim          3
-hiddenLayerDim    50
+hiddenLayerDim    100
 nHiddenLayer      10
 outputDim         4
 NEQN              2000
 NBC               50
 NIC               300
 transient         1
-KEPOCH            1
-ABSTOL            1e-4
-BATCHSIZE         1000
+KEPOCH            30
+ABSTOL            1e-3
+BATCHSIZE         500

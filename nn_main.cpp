@@ -27,6 +27,7 @@
 #include <torch/serialize/output-archive.h>
 #include <vector>
 #include <cmath>
+#include <torch/script.h>
 //- loads in python like indaexing of tensors
 using namespace torch::indexing; 
 
@@ -65,17 +66,6 @@ void PinNetImpl::create_layers()
         torch::nn::SiLU() // swish function X * RELU(X)
       )
     );
-    //- why ????
-    /*
-    hidden_layers->push_back
-    (
-      register_module
-      (
-        "batch norm",
-        torch::nn::BatchNorm1d()
-      )
-    );
-    */
   }
   //- register output layer
   output = register_module
@@ -207,6 +197,9 @@ torch::Tensor d_dn
 //----------------------------CahnHillard function definitions---------------//
 
 
+//- TODO make all derivatives members of mesh class and calculate them onlyn once
+//  per iteration, might reduce runTime 
+
 //- thermoPhysical properties for mixture
 torch::Tensor CahnHillard::thermoProp
 (
@@ -228,10 +221,8 @@ torch::Tensor CahnHillard::L_Mass2D
   const mesh2D &mesh 
 )
 {
-  const torch::Tensor &u = mesh.fieldsPDE_.index({Slice(),0});
-  const torch::Tensor &v = mesh.fieldsPDE_.index({Slice(),1});
-  torch::Tensor du_dx = d_d1(u,mesh.iPDE_,0);
-  torch::Tensor dv_dy = d_d1(v,mesh.iPDE_,1);
+  const torch::Tensor &du_dx = mesh.internalMesh_.gradU_.index({Slice(),0});
+  const torch::Tensor &dv_dy = mesh.internalMesh_.gradV_.index({Slice(),0});
   torch::Tensor loss = du_dx + dv_dy;
   return torch::mse_loss(loss, torch::zeros_like(loss));
 }
@@ -243,9 +234,9 @@ torch::Tensor CahnHillard::phi
 )
 {
   float &e = mesh.thermo_.epsilon;
-  const torch::Tensor &C = mesh.fieldsPDE_.index({Slice(),3});
-  torch::Tensor Cxx = d_dn(C,mesh.iPDE_,2,0);
-  torch::Tensor Cyy = d_dn(C,mesh.iPDE_,2,1);
+  const torch::Tensor &C = mesh.internalMesh_.output_.index({Slice(),3});
+  const torch::Tensor &Cxx = mesh.internalMesh_.d2C_dxx_;
+  const torch::Tensor &Cyy = mesh.internalMesh_.d2C_dyy_;
   return C*(C*C-1) - e*e*(Cxx + Cyy); 
 }
 
@@ -257,19 +248,15 @@ torch::Tensor CahnHillard::CahnHillard2D
 {
   const float &e = mesh.thermo_.epsilon;
   const float &Mo = mesh.thermo_.Mo;
-  //- u vel
-  const torch::Tensor &u = mesh.fieldsPDE_.index({Slice(),0});
-  //- v vel
-  const torch::Tensor &v = mesh.fieldsPDE_.index({Slice(),1});
-  //- phase field var
-  const torch::Tensor &C = mesh.fieldsPDE_.index({Slice(),3});
   //- derivatives 
-  torch::Tensor dC_dt = d_d1(C,mesh.iPDE_,2);
-  torch::Tensor dC_dx = d_d1(C,mesh.iPDE_,0);
-  torch::Tensor dC_dy = d_d1(C,mesh.iPDE_,1);
+  const torch::Tensor &u = mesh.internalMesh_.output_.index({Slice(),0});
+  const torch::Tensor &v = mesh.internalMesh_.output_.index({Slice(),0});
+  torch::Tensor dC_dt = mesh.internalMesh_.gradC_.index({Slice(),2});
+  torch::Tensor dC_dx = mesh.internalMesh_.gradC_.index({Slice(),0});
+  torch::Tensor dC_dy = mesh.internalMesh_.gradC_.index({Slice(),1});
   torch::Tensor phi = CahnHillard::phi(mesh);
-  torch::Tensor dphi_dxx = d_dn(phi,mesh.iPDE_,2,0);
-  torch::Tensor dphi_dyy = d_dn(phi,mesh.iPDE_,2,1);
+  torch::Tensor dphi_dxx = d_dn(phi,mesh.internalMesh_.input_,2,0);
+  torch::Tensor dphi_dyy = d_dn(phi,mesh.internalMesh_.input_,2,1);
   //- loss term
   torch::Tensor loss = dC_dt + u*dC_dx + v*dC_dy - 
     Mo*(dphi_dxx + dphi_dyy);
@@ -285,9 +272,9 @@ torch::Tensor CahnHillard::surfaceTension
 {
   const float &sigma = mesh.thermo_.sigma0;
   const float &e_inv = 1.0/mesh.thermo_.epsilon;
-  const torch::Tensor &C = mesh.fieldsPDE_.index({Slice(),3});
+  const torch::Tensor &C = mesh.internalMesh_.output_.index({Slice(),3});
   torch::Tensor surf = e_inv*sigma*mesh.thermo_.C*CahnHillard::phi(mesh)
-    *d_d1(C,mesh.iPDE_,dim);
+    *d_d1(C,mesh.internalMesh_.input_,dim);
   return surf;
 } 
 
@@ -301,24 +288,24 @@ torch::Tensor CahnHillard::L_MomX2d
   float &muL = mesh.thermo_.muL;
   float rhoG = mesh.thermo_.rhoG;
   float muG = mesh.thermo_.muG;
-  const torch::Tensor &u = mesh.fieldsPDE_.index({Slice(),0});
-  const torch::Tensor &v = mesh.fieldsPDE_.index({Slice(),1});
-  const torch::Tensor &p = mesh.fieldsPDE_.index({Slice(),2});
-  const torch::Tensor &C = mesh.fieldsPDE_.index({Slice(),3});
+  const torch::Tensor &u = mesh.internalMesh_.output_.index({Slice(),0});
+  const torch::Tensor &v = mesh.internalMesh_.output_.index({Slice(),1});
+  const torch::Tensor &p = mesh.internalMesh_.output_.index({Slice(),2});
+  const torch::Tensor &C = mesh.internalMesh_.output_.index({Slice(),3});
   //- get density of mixture TODO correct this function to take in just mesh
-  torch::Tensor rhoM = CahnHillard::thermoProp(rhoL, rhoG, mesh.fieldsPDE_);
+  torch::Tensor rhoM = CahnHillard::thermoProp(rhoL, rhoG, mesh.internalMesh_.output_);
   //- get viscosity of mixture
-  torch::Tensor muM = CahnHillard::thermoProp(muL, muG, mesh.fieldsPDE_);
-  torch::Tensor du_dt = d_d1(u,mesh.iPDE_,2);
-  torch::Tensor du_dx = d_d1(u,mesh.iPDE_,0);
-  torch::Tensor du_dy = d_d1(u,mesh.iPDE_,1);
-  torch::Tensor dv_dx = d_d1(v,mesh.iPDE_,0);
-  torch::Tensor dC_dx = d_d1(C,mesh.iPDE_,0);
-  torch::Tensor dC_dy = d_d1(C,mesh.iPDE_,1);
-  torch::Tensor dp_dx = d_d1(p,mesh.iPDE_,0);
+  torch::Tensor muM = CahnHillard::thermoProp(muL, muG, mesh.internalMesh_.output_);
+  const torch::Tensor &du_dt = mesh.internalMesh_.gradU_.index({Slice(),2});
+  const torch::Tensor &du_dx = mesh.internalMesh_.gradU_.index({Slice(),0});
+  const torch::Tensor &du_dy = mesh.internalMesh_.gradU_.index({Slice(),1});
+  const torch::Tensor &dv_dx = mesh.internalMesh_.gradV_.index({Slice(),0});
+  const torch::Tensor &dC_dx = mesh.internalMesh_.gradC_.index({Slice(),0});
+  const torch::Tensor &dC_dy = mesh.internalMesh_.gradC_.index({Slice(),1});
+  const torch::Tensor &dp_dx = mesh.internalMesh_.gradP_.index({Slice(),0});
   //- derivative order first spatial variable later
-  torch::Tensor du_dxx = d_dn(u,mesh.iPDE_,2,0);
-  torch::Tensor du_dyy = d_dn(u,mesh.iPDE_,2,1);
+  const torch::Tensor &du_dxx = mesh.internalMesh_.d2u_dxx_;
+  const torch::Tensor &du_dyy = mesh.internalMesh_.d2u_dyy_;
   //- get x component of the surface tension force
   torch::Tensor fx = CahnHillard::surfaceTension(mesh,0);
   torch::Tensor loss1 = rhoM*(du_dt + u*du_dx + v*du_dy) + dp_dx;
@@ -335,28 +322,31 @@ torch::Tensor CahnHillard::L_MomY2d
   const mesh2D &mesh
 )
 {
+ 
   float &rhoL = mesh.thermo_.rhoL;
   float &muL = mesh.thermo_.muL;
   float rhoG = mesh.thermo_.rhoG;
   float muG = mesh.thermo_.muG;
-  const torch::Tensor &u = mesh.fieldsPDE_.index({Slice(),0});
-  const torch::Tensor &v = mesh.fieldsPDE_.index({Slice(),1});
-  const torch::Tensor &p = mesh.fieldsPDE_.index({Slice(),2});
-  const torch::Tensor &C = mesh.fieldsPDE_.index({Slice(),3});
+  const torch::Tensor &u = mesh.internalMesh_.output_.index({Slice(),0});
+  const torch::Tensor &v = mesh.internalMesh_.output_.index({Slice(),1});
+  const torch::Tensor &p = mesh.internalMesh_.output_.index({Slice(),2});
+  const torch::Tensor &C = mesh.internalMesh_.output_.index({Slice(),3});
   //- get density of mixture TODO correct this function to take in just mesh
-  torch::Tensor rhoM = CahnHillard::thermoProp(rhoL, rhoG, mesh.fieldsPDE_);
+  torch::Tensor rhoM = CahnHillard::thermoProp(rhoL, rhoG, mesh.internalMesh_.output_);
   //- get viscosity of mixture
-  torch::Tensor muM = CahnHillard::thermoProp(muL, muG, mesh.fieldsPDE_);
-  torch::Tensor dv_dt = d_d1(v,mesh.iPDE_,2);
-  torch::Tensor dv_dx = d_d1(v,mesh.iPDE_,0);
-  torch::Tensor dv_dy = d_d1(v,mesh.iPDE_,1);
-  torch::Tensor du_dx = d_d1(u,mesh.iPDE_,0);
-  torch::Tensor dC_dx = d_d1(C,mesh.iPDE_,0);
-  torch::Tensor dC_dy = d_d1(C,mesh.iPDE_,1);
-  torch::Tensor dp_dy = d_d1(p,mesh.iPDE_,1);
+  torch::Tensor muM = CahnHillard::thermoProp(muL, muG, mesh.internalMesh_.output_);
+  const torch::Tensor &dv_dt = mesh.internalMesh_.gradV_.index({Slice(),2});
+  const torch::Tensor &du_dx = mesh.internalMesh_.gradU_.index({Slice(),0});
+  const torch::Tensor &dv_dy = mesh.internalMesh_.gradV_.index({Slice(),1});
+  const torch::Tensor &dv_dx = mesh.internalMesh_.gradV_.index({Slice(),0});
+  const torch::Tensor &dC_dx = mesh.internalMesh_.gradC_.index({Slice(),0});
+  const torch::Tensor &dC_dy = mesh.internalMesh_.gradC_.index({Slice(),1});
+  const torch::Tensor &dp_dy = mesh.internalMesh_.gradP_.index({Slice(),1});
   //- derivative order first spatial variable later
-  torch::Tensor dv_dxx = d_dn(v,mesh.iPDE_,2,0);
-  torch::Tensor dv_dyy = d_dn(v,mesh.iPDE_,2,1);
+  const torch::Tensor &du_dxx = mesh.internalMesh_.d2u_dxx_;
+  const torch::Tensor &du_dyy = mesh.internalMesh_.d2u_dyy_;  //- derivative order first spatial variable later
+  torch::Tensor dv_dxx = mesh.internalMesh_.d2v_dxx_;
+  torch::Tensor dv_dyy = mesh.internalMesh_.d2v_dyy_;
   //- get x component of the surface tension force
   torch::Tensor fy = CahnHillard::surfaceTension(mesh,1);
   torch::Tensor gy = torch::full_like(fy,0.98);
@@ -402,19 +392,19 @@ torch::Tensor CahnHillard::BCloss(mesh2D &mesh)
 {
   
   //- get phase field vars at all the boundaries
-  torch::Tensor Cleft = mesh.fieldsLeft_.index({Slice(),3});
-  torch::Tensor Cright = mesh.fieldsRight_.index({Slice(),3});
-  torch::Tensor Ctop = mesh.fieldsTop_.index({Slice(),3});
-  torch::Tensor Cbottom = mesh.fieldsBottom_.index({Slice(),3});
+  torch::Tensor Cleft = mesh.leftWall_.output_.index({Slice(),3});
+  torch::Tensor Cright = mesh.rightWall_.output_.index({Slice(),3});
+  torch::Tensor Ctop = mesh.topWall_.output_.index({Slice(),3});
+  torch::Tensor Cbottom = mesh.bottomWall_.output_.index({Slice(),3});
   
   //- total boundary loss for u, v and C
-  torch::Tensor lossLeft = CahnHillard::slipWall(mesh.fieldsLeft_, mesh.iLeftWall_,0); 
+  torch::Tensor lossLeft = CahnHillard::slipWall(mesh.leftWall_.output_, mesh.leftWall_.input_,0); 
        //+ CahnHillard::zeroGrad(Cleft, mesh.iLeftWall_, 0);
-  torch::Tensor lossRight = CahnHillard::slipWall(mesh.fieldsRight_,mesh.iRightWall_, 0);
+  torch::Tensor lossRight = CahnHillard::slipWall(mesh.rightWall_.output_,mesh.rightWall_.input_, 0);
        //+ CahnHillard::zeroGrad(Cright, mesh.iRightWall_, 0);
-  torch::Tensor lossTop = CahnHillard::noSlipWall(mesh.fieldsTop_, mesh.iTopWall_);
+  torch::Tensor lossTop = CahnHillard::noSlipWall(mesh.topWall_.output_, mesh.topWall_.input_);
        //+ CahnHillard::zeroGrad(Ctop, mesh.iTopWall_, 1);
-  torch::Tensor lossBottom = CahnHillard::noSlipWall(mesh.fieldsBottom_, mesh.iBottomWall_);
+  torch::Tensor lossBottom = CahnHillard::noSlipWall(mesh.bottomWall_.output_, mesh.bottomWall_.input_);
        //+ CahnHillard::zeroGrad(Cbottom, mesh.iBottomWall_, 1);
   return lossLeft + lossRight + lossTop + lossBottom;
 }
@@ -423,11 +413,11 @@ torch::Tensor CahnHillard::BCloss(mesh2D &mesh)
 torch::Tensor CahnHillard::ICloss(mesh2D &mesh)
 {
   //- x vel prediction in current iteration
-  const torch::Tensor &u = mesh.fieldsIC_.index({Slice(),0});
+  const torch::Tensor &u = mesh.initialMesh_.output_.index({Slice(),0});
   //- y vel prediction in current iteration
-  const torch::Tensor &v = mesh.fieldsIC_.index({Slice(),1});
+  const torch::Tensor &v = mesh.initialMesh_.output_.index({Slice(),1});
   //- phaseField variable prediction in current iteration
-  const torch::Tensor &C = mesh.fieldsIC_.index({Slice(),2});
+  const torch::Tensor &C = mesh.initialMesh_.output_.index({Slice(),3});
   //- get all the intial losses
   torch::Tensor uLoss = torch::mse_loss(u,CahnHillard::u_at_InitialTime(mesh));
   torch::Tensor vLoss = torch::mse_loss(v,CahnHillard::v_at_InitialTime(mesh));
@@ -456,9 +446,9 @@ torch::Tensor CahnHillard::C_at_InitialTime(mesh2D &mesh)
     const float &yc = mesh.yc;
     const float &e = mesh.thermo_.epsilon;
     //- x 
-    const torch::Tensor &x = mesh.iIC_.index({Slice(),0});
+    const torch::Tensor &x = mesh.initialMesh_.input_.index({Slice(),0});
     //- y
-    const torch::Tensor &y = mesh.iIC_.index({Slice(),1});
+    const torch::Tensor &y = mesh.initialMesh_.input_.index({Slice(),1});
     //- intial condition
     torch::Tensor Ci =torch::tanh((torch::sqrt(torch::pow(x - xc, 2) + torch::pow(y - yc, 2)) - 0.15)/ (1.41421356237 * e));
     
@@ -467,7 +457,7 @@ torch::Tensor CahnHillard::C_at_InitialTime(mesh2D &mesh)
   else  
   {
     //- use previous converged neural net as intial conditions
-    torch::Tensor Ci = mesh.netPrev_->forward(mesh.iIC_).index({Slice(),3});
+    torch::Tensor Ci = mesh.netPrev_->forward(mesh.initialMesh_.input_).index({Slice(),3});
     return Ci;
   }
 }
@@ -476,12 +466,12 @@ torch::Tensor CahnHillard::u_at_InitialTime(mesh2D &mesh)
 {
   if(mesh.lbT_ ==0)
   {
-    return torch::zeros_like(mesh.iIC_.index({Slice(),0}));
+    return torch::zeros_like(mesh.initialMesh_.input_.index({Slice(),0}));
     
   }
   else
   {
-    return mesh.netPrev_->forward(mesh.iIC_).index({Slice(),0});
+    return mesh.netPrev_->forward(mesh.initialMesh_.input_).index({Slice(),0});
   }
 }
 //-v at intial time
@@ -489,11 +479,11 @@ torch::Tensor CahnHillard::v_at_InitialTime(mesh2D &mesh)
 {
   if(mesh.lbT_ ==0)
   {
-    return torch::zeros_like(mesh.iIC_.index({Slice(),0}));
+    return torch::zeros_like(mesh.initialMesh_.input_.index({Slice(),0}));
   }
   else
   {
-    return mesh.netPrev_->forward(mesh.iIC_).index({Slice(),1});
+    return mesh.netPrev_->forward(mesh.initialMesh_.input_).index({Slice(),1});
   }
 }
 
@@ -520,32 +510,6 @@ torch::Tensor CahnHillard::zeroGrad(torch::Tensor &I, torch::Tensor &X, int dim)
 }
 //---------------------end CahnHillard function definitions------------------//
 
-torch::Tensor Heat::L_Diffusion2D
-(
-  mesh2D &mesh
-)
-{
-  float PI = 3.14159265358979323846;
-  torch::Tensor u_xx = d_dn(mesh.fieldsPDE_,mesh.iPDE_,2,0);
-  torch::Tensor u_yy = d_dn(mesh.fieldsPDE_,mesh.iPDE_,2,1);
-  torch::Tensor fTerm =
-    -2*sin(PI*mesh.iPDE_.index({Slice(),0}))*sin(PI*mesh.iPDE_.index({Slice(),1}))*PI*PI;
-  return torch::mse_loss(u_xx+u_yy,fTerm);
-
-}
-
-//- total loss for 2d diffusion equation
-torch::Tensor Heat::loss(mesh2D &mesh)
-{
-  //- create samples
-  torch::Tensor pdeloss = Heat::L_Diffusion2D(mesh);
-  torch::Tensor l = torch::mse_loss(mesh.fieldsLeft_,torch::zeros_like(mesh.fieldsLeft_));
-  torch::Tensor r = torch::mse_loss(mesh.fieldsRight_,torch::zeros_like(mesh.fieldsRight_));
-  torch::Tensor t = torch::mse_loss(mesh.fieldsTop_,torch::zeros_like(mesh.fieldsTop_));
-  torch::Tensor b = torch::mse_loss(mesh.fieldsBottom_,torch::zeros_like(mesh.fieldsBottom_));
-  return l+b+r+t+pdeloss;
-  
-}
 //---------------------------mesh2d function definitions---------------------//
 
 //- construct computational domain for the PINN instance
@@ -576,24 +540,15 @@ mesh2D::mesh2D
 
 {
   TimeStep_ = dict.get<float>("stepSize");
-    //- get number of ponits from bounds and step size
   Nx_ = (ubX_ - lbX_)/deltaX_ + 1;
   Ny_ = (ubY_ - lbY_)/deltaY_ + 1;
   Nt_ = (ubT_ - lbT_)/deltaT_ + 1;
-
-  //- total number of points in the entire domain (nDOF)
   Ntotal_ = Nx_*Ny_*Nt_;
   //- populate the individual 1D grids
   xGrid = torch::linspace(lbX_, ubX_, Nx_,device_);
   yGrid = torch::linspace(lbY_, ubY_, Ny_,device_);
   tGrid = torch::linspace(lbT_, ubT_, Nt_,device_);
-  //- construct entire mesh domain for transient 2D simulations
-  mesh_ = torch::meshgrid({xGrid,yGrid,tGrid});
-  //- spatial grid for steady state simulations 
-  xyGrid = torch::meshgrid({xGrid,yGrid});
-  //- tensor to pass for converged neural net
-  xy = torch::stack({xyGrid[0].flatten(),xyGrid[1].flatten()},1);
-  xy.set_requires_grad(true);
+  internalMesh_.grid_ = torch::meshgrid({xGrid,yGrid,tGrid});
   //- create boundary grids
   createBC();
 }
@@ -604,9 +559,9 @@ torch::Tensor  mesh2D::operator()(int i, int j, int k)
   return torch::stack
   (
     {
-      mesh_[0].index({i, j, k}), 
-      mesh_[1].index({i, j, k}), 
-      mesh_[2].index({i, j, k})
+      internalMesh_.grid_[0].index({i, j, k}), 
+      internalMesh_.grid_[1].index({i, j, k}), 
+      internalMesh_.grid_[2].index({i, j, k})
     }
   ); 
 }
@@ -614,27 +569,17 @@ torch::Tensor  mesh2D::operator()(int i, int j, int k)
 //- create boundary grids
 void mesh2D::createBC()
 {
-  
+  //temp tensors
   torch::Tensor xLeft = torch::tensor(lbX_,device_);
   torch::Tensor xRight = torch::tensor(ubX_,device_);
   torch::Tensor yBottom = torch::tensor(lbY_, device_);
   torch::Tensor yTop = torch::tensor(ubY_, device_);
   torch::Tensor tInitial = torch::tensor(lbT_,device_);
-  if(net_->transient_==1)
-  {
-    leftWall = torch::meshgrid({xLeft,yGrid,tGrid});
-    rightWall = torch::meshgrid({xRight,yGrid,tGrid});
-    topWall = torch::meshgrid({xGrid,yTop,tGrid});
-    bottomWall = torch::meshgrid({xGrid,yBottom,tGrid});
-    initialGrid_ = torch::meshgrid({xGrid,yGrid,tInitial});
-  }
-  else 
-  {
-    leftWall = torch::meshgrid({xLeft,yGrid});
-    rightWall = torch::meshgrid({xRight,yGrid});
-    topWall = torch::meshgrid({xGrid,yTop});
-    bottomWall = torch::meshgrid({xGrid,yBottom});
-  }
+  leftWall_.grid_ = torch::meshgrid({xLeft,yGrid,tGrid});
+  rightWall_.grid_ = torch::meshgrid({xRight,yGrid,tGrid});
+  topWall_.grid_= torch::meshgrid({xGrid,yTop,tGrid});
+  bottomWall_.grid_ = torch::meshgrid({xGrid,yBottom,tGrid});
+  initialMesh_.grid_ = torch::meshgrid({xGrid,yGrid,tInitial});
 }
 
 //- general method to create samples
@@ -646,15 +591,10 @@ void mesh2D::createSamples
   int nSamples
 ) 
 {
-  //- vectors to stack
   std::vector<torch::Tensor> vectorStack;
-  //- total number of points in the grid
   int ntotal = grid[0].numel();
-  //- random indices for PDE loss
   torch::Tensor indices = torch::randperm
   (ntotal,device_).slice(0,0,nSamples);
-  
-  //- push vectors to vectors stack
   for(int i=0;i<grid.size();i++)
   {
     vectorStack.push_back
@@ -665,9 +605,7 @@ void mesh2D::createSamples
       ).index_select(0,indices)
     );
   }
-  //- pass stack to get samples
   samples = torch::stack(vectorStack,1);
-  //- set gradient =true
   samples.set_requires_grad(true);
 }
 
@@ -684,46 +622,23 @@ void mesh2D::createTotalSamples
     //- create Indices in the first iteration itself
     createIndices();
   }
-  if(net_->transient_==0)
-  {
-    //- create samples for intial condition loss only if simulationn is transient
-    torch::Tensor batchIndices = torch::slice
-    (
-      pdeIndices_,
-      0,
-      iter*net_->BATCHSIZE,
-      (iter + 1)*net_->BATCHSIZE,
-      1 // step size when slicing
-    );
-    createSamples(xyGrid,iPDE_,batchIndices);
-  }
-  else
-  {
-    torch::Tensor batchIndices = pdeIndices_.slice
-    (
-      0,
-      iter*net_->BATCHSIZE,
-      (iter + 1)*net_->BATCHSIZE,
-      1 // step size when slicing
-    );
-    createSamples(mesh_,iPDE_,batchIndices);
-  }
-  //- create samples only for the first iteration
+  
+  torch::Tensor batchIndices = internalMesh_.indices_.slice
+  (
+    0,
+    iter*net_->BATCHSIZE,
+    (iter + 1)*net_->BATCHSIZE,
+    1 // step size when slicing
+  );
+  createSamples(internalMesh_.grid_,internalMesh_.input_,batchIndices);
   if(iter ==0)
   {
-    if(net_->transient_ == 1)
-    {
-      //- update samples for intialGrid
-      createSamples(initialGrid_,iIC_,net_->N_IC);
-    }
-    //- update samples for left wall 
-    createSamples(leftWall,iLeftWall_,net_->N_BC);
-    //- update samples for right wall 
-    createSamples(rightWall, iRightWall_,net_->N_BC);
-    //- update samples for top wall 
-    createSamples(topWall,iTopWall_,net_->N_BC);
-    //- update samples for bottom wall
-    createSamples(bottomWall,iBottomWall_,net_->N_BC); 
+    //- update samples 
+    createSamples(leftWall_.grid_,leftWall_.input_,net_->N_BC);
+    createSamples(rightWall_.grid_, rightWall_.input_,net_->N_BC);
+    createSamples(topWall_.grid_,topWall_.input_,net_->N_BC);
+    createSamples(bottomWall_.grid_,bottomWall_.input_,net_->N_BC);
+    createSamples(initialMesh_.grid_,initialMesh_.input_,net_->N_IC);
   }
 }
 
@@ -735,33 +650,24 @@ void mesh2D::createTotalSamples
 void mesh2D::update(int iter)
 { 
   createTotalSamples(iter);
-  // std::cout<<"updating solution fields\n";
-  //- update all fields
-  fieldsPDE_ = net_->forward(iPDE_);
-  if(net_->transient_ == 1)
-  { 
-    fieldsIC_ = net_->forward(iIC_);
-  }
-  fieldsLeft_ = net_->forward(iLeftWall_);
-  fieldsRight_ = net_->forward(iRightWall_);
-  fieldsBottom_ = net_->forward(iBottomWall_);
-  fieldsTop_ = net_->forward(iTopWall_);
+  internalMesh_.output_ = net_->forward(internalMesh_.input_);
+  initialMesh_.output_ = net_->forward(initialMesh_.input_);
+  leftWall_.output_ = net_->forward(leftWall_.input_);
+  rightWall_.output_ = net_->forward(rightWall_.input_);
+  bottomWall_.output_ = net_->forward(bottomWall_.input_);
+  topWall_.output_ = net_->forward(topWall_.input_);
+  computeGradPDE(internalMesh_);
 }
 
-//- creates indices tensor for iPDE
+//- creates indices tensor for internal mesh, can add indices for other boundary as well
 void mesh2D::createIndices()
 {
-  if(net_->transient_==0)
-  {
-    pdeIndices_ = 
-      torch::randperm(xyGrid[0].numel(),device_).slice(0,0,net_->N_EQN,1);
-  }
-  else
-  {
-    pdeIndices_ = 
-      torch::randperm(mesh_[0].numel(),device_).slice(0,0,net_->N_EQN,1);
-    
-  }
+  internalMesh_.indices_ = 
+  torch::randperm
+  (
+    internalMesh_.grid_[0].numel(),
+    device_
+  ).slice(0,0,net_->N_EQN,1);
 }
 
 //- createSamples over load to create samples for pde loss as it will buffer
@@ -802,7 +708,7 @@ void mesh2D::updateMesh()
   //- update tGrid
   tGrid = torch::linspace(lbT_, ubT_, Nt_,device_);
   //- update main mesh
-  mesh_ = torch::meshgrid({xGrid,yGrid,tGrid});
+  internalMesh_.grid_ = torch::meshgrid({xGrid,yGrid,tGrid});
   //- update the boundary grids
   createBC();
   //- transfer over parameters of current converged net to 
@@ -810,6 +716,25 @@ void mesh2D::updateMesh()
   //- intial losses
   loadState(net_, netPrev_);
 }
+
+void mesh2D::computeGradPDE(feature &feat)
+{
+  const torch::Tensor &u = internalMesh_.output_.index({Slice(),0});
+  const torch::Tensor &v = internalMesh_.output_.index({Slice(),1});
+  const torch::Tensor &p = internalMesh_.output_.index({Slice(),2});
+  const torch::Tensor &C = internalMesh_.output_.index({Slice(),3});
+  feat.gradU_ = d_d1(u,internalMesh_.input_);
+  feat.gradV_ = d_d1(v,internalMesh_.input_);
+  feat.gradP_ = d_d1(p,internalMesh_.input_);
+  feat.gradC_ = d_d1(C,internalMesh_.input_);
+  feat.d2C_dxx_ = d_dn(C,internalMesh_.input_,2,0);
+  feat.d2C_dyy_ = d_dn(C,internalMesh_.input_,2,1);  
+  feat.d2u_dxx_ = d_dn(u,internalMesh_.input_,2,0);
+  feat.d2u_dyy_ = d_dn(u,internalMesh_.input_,2,1);
+  feat.d2v_dxx_ = d_dn(v,internalMesh_.input_,2,0);
+  feat.d2v_dyy_ = d_dn(v,internalMesh_.input_,2,1);
+}
+
 
 //-------------------------end mesh2D definitions----------------------------//
 
@@ -851,12 +776,6 @@ void loadState(PinNet& net1, PinNet &net2)
   }
   torch::autograd::GradMode::set_enabled(true);
 } 
-
-
-
-
-
-
 
 
 

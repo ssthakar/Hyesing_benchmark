@@ -24,4 +24,6 @@ plt.colorbar(contour)  # Add color bar indicating temperature scale
 plt.title('Temperature Tricontour Plot')
 plt.xlabel('X-axis')
 plt.ylabel('Y-axis')
+
+plt.gca().set_aspect('equal')
 plt.show()

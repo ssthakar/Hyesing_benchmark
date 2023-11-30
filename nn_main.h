@@ -113,6 +113,32 @@ class  PinNetImpl:
 //- create Torch module
 TORCH_MODULE(PinNet);
 
+//- stores inputs, outputs, meshgrids and grads
+//- makes the mesh class cleaner and compact
+class feature
+{
+  public:
+    std::vector<torch::Tensor> grid_;
+    torch::Tensor indices_;
+    torch::Tensor input_;
+    torch::Tensor output_;
+    //- first derivatives of outputs with inputs
+    torch::Tensor gradU_;
+    torch::Tensor gradV_;
+    torch::Tensor gradP_;
+    torch::Tensor gradC_;
+    //- second derivatives of outputs with inputs
+    torch::Tensor d2u_dxx_;
+    torch::Tensor d2u_dyy_;
+    torch::Tensor d2v_dxx_;
+    torch::Tensor d2v_dyy_;
+    torch::Tensor d2C_dxx_;
+    torch::Tensor d2C_dyy_;
+    torch::Tensor d2Phi_dxx_;
+    torch::Tensor d2Phi_dyy_;
+};
+
+
 //---------------------------------------------------------------------------// 
 
               //----Computational domain class declaration-----//
@@ -123,35 +149,23 @@ class mesh2D :
   {
   //- public fields
   public:
-    //- Dictionary reference
     const Dictionary &dict;
-    //- current neural net instance
     PinNet &net_;
-    //- previous neural net instance
     PinNet &netPrev_;
-    //- lower bounds for x 
+    //- bounds and stepSizes for the spatioTemporal Domain
     const float lbX_;
-    //- upper bounds for xGrid
     const float ubX_;
-    //- deltaX
     const float deltaX_;
-    //- lower bounds for y 
     const float lbY_;
-    //- upper bounds for y 
     const float ubY_;
-    //- step size for y
     const float deltaY_;
-    //- lower bound for time  
     float lbT_;
-    //- upper bound for time
     float ubT_;
-    //- step size for t
     const float deltaT_;
-    //- center of the bubble at time t=0
+    //- x_coord for center of the bubble at time t=0
     const float xc;
+    //- y coord for center of the bubble at time t=0
     const float yc;
-    //- complete computational domain (x X y X t)
-    std::vector<torch::Tensor> mesh_;
     //- x grid (1D tensor)
     torch::Tensor xGrid;
     //- y grid
@@ -163,43 +177,17 @@ class mesh2D :
     //-xy spatial grid to use for plotting 
     torch::Tensor xy;
     //- left wall grid
-    std::vector<torch::Tensor> leftWall;
-    torch::Tensor iLeftWall_;
-    torch::Tensor il;
-    torch::Tensor leftIndices_;
-    //- right wall 
-    std::vector<torch::Tensor> rightWall;
-    torch::Tensor iRightWall_;
-    torch::Tensor ir;
-    torch::Tensor rightIndices_;
-    //- top wall
-    std::vector<torch::Tensor> topWall;
-    torch::Tensor iTopWall_;
-    torch::Tensor it;
-    torch::Tensor topIndices_;
-    //- bottom walla
-    std::vector<torch::Tensor> bottomWall;
-    torch::Tensor iBottomWall_;
-    torch::Tensor ib;
-    torch::Tensor bottomIndices_;
+    feature internalMesh_;
+    feature leftWall_;
+    feature rightWall_;
+    feature topWall_;
+    feature bottomWall_;
+    feature initialMesh_;
+
     //- reference to device
     torch::Device &device_;
     //- reference to thermoPhyiscal class
     thermoPhysical &thermo_;
-    //- tensor to store in solution fields
-    torch::Tensor fieldsPDE_;
-    torch::Tensor fieldsIC_;
-    torch::Tensor fieldsLeft_;
-    torch::Tensor fieldsRight_;
-    torch::Tensor fieldsTop_;
-    torch::Tensor fieldsBottom_;
-    //- sampling points for PDE loss
-    torch::Tensor iPDE_;
-    torch::Tensor pdeIndices_;
-    //-sampling points for IC loss
-    std::vector<torch::Tensor> initialGrid_;
-    torch::Tensor iIC_;
-    torch::Tensor icIndices_;
     //- number of points in x direction 
     int Nx_;
     //- number of points in y direction
@@ -210,22 +198,23 @@ class mesh2D :
     int Nxy_;
     //- total number of points
     int Ntotal_;
-    //- time step for adaptive time marching 
+    //- time step for adaptive time marching,used at end of training 
     float TimeStep_;
-    //- constructor
+    
     mesh2D
     (
-      Dictionary &meshDict,
-      PinNet &net,
-      PinNet &netPrev,
-      torch::Device &device,
-      thermoPhysical &thermo
+      Dictionary &meshDict, // dict reference
+      PinNet &net, // training net
+      PinNet &netPrev, // place holder net to act as initial condition
+      torch::Device &device, // device reference
+      thermoPhysical &thermo // thermo class reference
     );
     //- operator overload to use index notation for access
     torch::Tensor operator()(int i,int j,int k);
     //- create boundary grids
     void createBC();
-    //- after sub-net converges, upadate solution fields
+    //- function to be called to update solution fields after every iterations
+    //- in one epoch, update solution fields and pde samples (batching)
     void update(int iter);
     //- general function to create samples for neural net input
     void createSamples 
@@ -234,12 +223,15 @@ class mesh2D :
       torch::Tensor &samples, // reference to input feature tensor
       int nSamples // total number of samples to extract from grid
     );
+    //- overload on createSamples function, creates samples from grid, and tensor
+    //- containing the indices
     void createSamples
     (
       std::vector<torch::Tensor> &grid,
       torch::Tensor &samples,
       torch::Tensor &indices
     );
+    //- function creates indices for the pde samples
     void createIndices();
     //-  creates total samples 
     void createTotalSamples
@@ -248,9 +240,13 @@ class mesh2D :
     );
     //- update time parameters for next time interval
     void updateMesh();
+    
     void getOutputMesh();
+    
+    //- computes and stores gradients for all meshes
+    void computeGradPDE(feature &feat);
+    void computeGradBoundary(feature &feat);
 };
-
 
 //---------------------------------------------------------------------------//
 
