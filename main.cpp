@@ -9,12 +9,10 @@
 #include <iostream>
 #include <torch/csrc/autograd/autograd.h>
 #include <torch/csrc/jit/api/module.h>
-#include <torch/csrc/jit/serialization/import.h>
-#include <torch/cuda.h>
 #include <torch/torch.h>
 #include "nn_main.h"
 #include "utils.h"
-#include <torch/script.h>
+
 //- loads in python like indexing of tensors
 using namespace torch::indexing;
 
@@ -105,7 +103,6 @@ void writeTensorToFile(torch::Tensor& tensor, torch::Tensor& additionalTensor, c
 //- main 
 int main(int argc,char * argv[])
 {
-  
   Dictionary debugDict = Dictionary("../debug.txt");
   bool debug = debugDict.get<bool>("DEBUG");
   if(debug)
@@ -130,7 +127,6 @@ int main(int argc,char * argv[])
   //- load nets to device if available
   net1->to(device);
   net2->to(device);
-  
   //- create dict for mesh
   Dictionary meshDict = Dictionary("../mesh.txt");
   //- create dict for thermoPhysical class
@@ -157,15 +153,20 @@ int main(int argc,char * argv[])
   // torch::Tensor C = CahnHillard::C_at_InitialTime(mesh);
   // writeTensorToFile(C,"intial.txt");
     
-
+  if(debug)
+  { 
+    mesh.update(0);
+    mesh.update(1);
+    std::cout<<mesh.fieldsPDE_<<std::endl;
+  }
 
 
   //- TODO intialize optim paras from dictionary to avoid recompilation 
   //- declare optimizer instance to be used in training
   //- learning rate is decreased over the traning process and the optimizer class instance is changed
-  torch::optim::Adam adam_optim1(mesh.net_->parameters(), torch::optim::AdamOptions(1e-4));  
-  torch::optim::Adam adam_optim2(mesh.net_->parameters(), torch::optim::AdamOptions(1e-5)); 
-  torch::optim::Adam adam_optim3(mesh.net_->parameters(), torch::optim::AdamOptions(1e-6));
+  torch::optim::Adam adam_optim1(mesh.net_->parameters(), torch::optim::AdamOptions(1e-3));  
+  torch::optim::Adam adam_optim2(mesh.net_->parameters(), torch::optim::AdamOptions(1e-4)); 
+  torch::optim::Adam adam_optim3(mesh.net_->parameters(), torch::optim::AdamOptions(1e-5));
 
 
   //- trainig begins here
@@ -173,7 +174,9 @@ int main(int argc,char * argv[])
   float loss;
 
   //- file to print out loss history
+  std::ofstream lossFile("loss.txt");
   std::cout<<"Traning...\n";
+  
   //- start profile clock
   auto start_time = std::chrono::high_resolution_clock::now();
   //- epoch loop
@@ -185,30 +188,31 @@ int main(int argc,char * argv[])
       float totalLoss=0.0;
       for(int i=0;i<mesh.net_->NITER_;i++)
       {
+        //- clear the gradients wrt to network parameters and input features
+        // optim.zero_grad();
         //- generate solution fields from forward pass, accumulate gradients
         mesh.update(i);
         //- get total loss for the optimizer (PDE,IC,BC)
         auto loss = CahnHillard::loss(mesh);
-        //- back propogate
+        //- back propogate and accumulate gradiets of loss wrt to parameters
         loss.backward();
         //- get the total loss across all iterations within the epoch
         totalLoss +=loss.item<float>();
-        
       }
-      optim.step();
-      optim.zero_grad();
-        std::cout<<iter<<"\n";
-        //- return the average loss
+			//- update network parameters
+			optim.step();
+			optim.zero_grad();
+      //- return the average loss
       return totalLoss/mesh.net_->NITER_;
     };
     // std::cout<<iter<<"\n";
     
     //- change learning rate 
-    if (iter <= 1000)
+    if (iter <= 4000)
     {
       loss = closure(adam_optim1);
     } 
-    else if(iter <= 2000) 
+    else if(iter <= 8000) 
     { 
       loss = closure(adam_optim2);
     }
@@ -224,7 +228,30 @@ int main(int argc,char * argv[])
       std::cout << "  iter=" << iter << ", loss=" << std::setprecision(7) << loss<<" lr: "<<adam_optim1.defaults().get_lr()<<"\n";
       // lossFile<<iter<<" "<<loss<<"\n";
     }
+		if(iter % 5000 == 0)
+		{
+			std::cout<<"saving output..."<<"\n";
+			torch::Tensor grid = torch::stack
+  		(
+    		{
+      		torch::flatten(mesh.xyGrid[0]),
+      		torch::flatten(mesh.xyGrid[1]),
+      		torch::full_like(torch::flatten(mesh.xyGrid[1]),0.5) //time values 
+      		//torch::flatten(mesh.mesh_[2])
+    		},1
+  		);
+	
+			//- transfer grid to device
+			grid.to(mesh.device_);  
 
+  		//- get predicted output, and from that get phaseField 
+  		torch::Tensor C1 = mesh.net_->forward(grid);
+  
+  		//- write out input data for python to plot
+  		writeTensorToFile(grid,"grid5000.txt");
+  		writeTensorToFile(C1,"phaseField5000.txt"); 
+ 
+		}
     //- stop training if target loss achieved
     if (loss < mesh.net_->ABS_TOL) 
     {
@@ -234,13 +261,11 @@ int main(int argc,char * argv[])
       iter += 1;
       //- update netPrev_ field in the mesh class instance
       // loadState(mesh.net_,mesh.netPrev_);
-      std::cout<<iter<<std::endl;
+     // std::cout<<iter<<std::endl;
       break;
 	  }
     iter += 1;
   }
-  //- indicate saved model is a result of max iters running out
-  torch::save(mesh.net_,"saved_model_maxIter.pt");
   //- end profile clock
   auto end_time = std::chrono::high_resolution_clock::now();
   
@@ -250,28 +275,26 @@ int main(int argc,char * argv[])
   //- info out runTime
   std::cout << "Execution time: " << duration.count() << " microseconds" << std::endl;
   
-  // std::cout<<mesh.internalMesh_.grid_[0].sizes()<<std::endl;
+  //- for plotting final timeStep
+  torch::Tensor grid = torch::stack
+  (
+    {
+      torch::flatten(mesh.xyGrid[0]),
+      torch::flatten(mesh.xyGrid[1]),
+      torch::full_like(torch::flatten(mesh.xyGrid[1]),0.5) //time values 
+      //torch::flatten(mesh.mesh_[2])
+    },1
+  );
+	
+	//- transfer grid to device
+	grid.to(mesh.device_);  
 
-  // //- for plotting final timeStep
-  // torch::Tensor grid = torch::stack
-  // (
-  //   {
-  //     torch::flatten(mesh.xyGrid[0]),
-  //     torch::flatten(mesh.xyGrid[1]),
-  //     torch::full_like(torch::flatten(mesh.xyGrid[0]),0.7)
-  //     // torch::flatten(mesh.mesh_[2])
-  //   },1
-  // );
-  // // grid.to(mesh.device_);
-  // //- get predicted output u,v,p and C 
-  // // torch::load("model.pt",mesh.netPrev_);
-  // //- write out input data for python to plot
-  // PinNet net3 = PinNet(netDict);
-  // torch::load(net3,"../model.pt");
-  // writeTensorToFile(grid,"grid.txt");
-  // torch::Tensor C1 = net3->forward(grid);
-  // writeTensorToFile(C1,"phaseField.txt"); 
-  // 
-  return 0;
+  //- get predicted output, and from that get phaseField 
+  torch::Tensor C1 = mesh.net_->forward(grid);
+  
+  //- write out input data for python to plot
+  writeTensorToFile(grid,"grid.txt");
+  writeTensorToFile(C1,"phaseField.txt"); 
+    return 0;
 
 } 
