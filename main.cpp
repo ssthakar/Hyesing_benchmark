@@ -7,6 +7,7 @@
 #include <c10/core/TensorOptions.h>
 #include <fstream>
 #include <iostream>
+#include <string>
 #include <torch/csrc/autograd/autograd.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/torch.h>
@@ -169,132 +170,148 @@ int main(int argc,char * argv[])
   torch::optim::Adam adam_optim3(mesh.net_->parameters(), torch::optim::AdamOptions(1e-5));
 
 
-  //- trainig begins here
-  int iter=1;
-  float loss;
+  // Put info statement here
 
-  //- file to print out loss history
-  std::ofstream lossFile("loss.txt");
-  std::cout<<"Traning...\n";
-  
-  //- start profile clock
-  auto start_time = std::chrono::high_resolution_clock::now();
-  //- epoch loop
-  while(iter<=mesh.net_->K_EPOCH)
+  //- Time marching loop
+  for(int N=0;N<2;N++)
   {
-    //- define closure for optimizer class to work with
-    auto closure = [&](torch::optim::Optimizer &optim)
-    { 
-      float totalLoss=0.0;
-      for(int i=0;i<mesh.net_->NITER_;i++)
-      {
-        //- clear the gradients wrt to network parameters and input features
-        // optim.zero_grad();
-        //- generate solution fields from forward pass, accumulate gradients
-        mesh.update(i);
-        //- get total loss for the optimizer (PDE,IC,BC)
-        auto loss = CahnHillard::loss(mesh);
-        //- back propogate and accumulate gradiets of loss wrt to parameters
-        loss.backward();
-        //- get the total loss across all iterations within the epoch
-        totalLoss +=loss.item<float>();
-      }
-			//- update network parameters
-			optim.step();
-			optim.zero_grad();
-      //- return the average loss
-      return totalLoss/mesh.net_->NITER_;
-    };
-    // std::cout<<iter<<"\n";
+    //- set up epoch loop
+    int iter=1;
+    float loss;
+
+    //- file to print out loss history
+    std::ofstream lossFile("loss.txt");
+    std::cout<<"Traning...\n";
     
-    //- change learning rate 
-    if (iter <= 4000)
+    //- start profile clock
+    auto start_time = std::chrono::high_resolution_clock::now();
+    //- epoch loop
+    while(iter<=mesh.net_->K_EPOCH)
     {
-      loss = closure(adam_optim1);
-    } 
-    else if(iter <= 8000) 
-    { 
-      loss = closure(adam_optim2);
-    }
-    else
-    {
-      loss = closure(adam_optim3);
-    }
+      //- define closure for optimizer class to work with
+      auto closure = [&](torch::optim::Optimizer &optim)
+      { 
+        float totalLoss=0.0;
+        for(int i=0;i<mesh.net_->NITER_;i++)
+        {
+          //- generate solution fields from forward pass, accumulate gradients
+          mesh.update(i);
+          //- get total loss for the optimizer (PDE,IC,BC)
+          auto loss = CahnHillard::loss(mesh);
+          //- back propogate and accumulate gradiets of loss wrt to parameters
+          loss.backward();
+          //- get the total loss across all iterations within the epoch
+          totalLoss +=loss.item<float>();
+        }
+        //- update network parameters
+        optim.step();
+        //- clear gradients for next batch iteration
+        optim.zero_grad();
+        //- return the average loss
+        return totalLoss/mesh.net_->NITER_;
+      };
 
-    //- info out to terminal
-    //- does not work on the cluster for some reason, rely on the loss.txt for info
-    if (iter % 10 == 0) 
-    {
-      std::cout << "  iter=" << iter << ", loss=" << std::setprecision(7) << loss<<" lr: "<<adam_optim1.defaults().get_lr()<<"\n";
-      // lossFile<<iter<<" "<<loss<<"\n";
-    }
-		if(iter % 5000 == 0)
-		{
-			std::cout<<"saving output..."<<"\n";
-			torch::Tensor grid = torch::stack
-  		(
-    		{
-      		torch::flatten(mesh.xyGrid[0]),
-      		torch::flatten(mesh.xyGrid[1]),
-      		torch::full_like(torch::flatten(mesh.xyGrid[1]),0.5) //time values 
-      		//torch::flatten(mesh.mesh_[2])
-    		},1
-  		);
-	
-			//- transfer grid to device
-			grid.to(mesh.device_);  
+      //- print out iteration numbers
+      if(debug)
+      {
+        std::cout<<iter<<"\n";
+      }
 
-  		//- get predicted output, and from that get phaseField 
-  		torch::Tensor C1 = mesh.net_->forward(grid);
-  
-  		//- write out input data for python to plot
-  		writeTensorToFile(grid,"grid5000.txt");
-  		writeTensorToFile(C1,"phaseField5000.txt"); 
- 
-		}
-    //- stop training if target loss achieved
-    if (loss < mesh.net_->ABS_TOL) 
-    {
-      //- save model to file for post processing, indicate saved model is due to convergence
-      torch::save(mesh.net_,"saved_moded_Converged.pt");
-      //- update iter to get correct iter count
+      //- TODO make it more general by making it a Dict 
+      //  and making all the other parameters as dicts as well
+      //- learning rate schedule
+      if (iter <= 4000)
+      {
+        loss = closure(adam_optim1);
+      } 
+      else if(iter <= 8000) 
+      { 
+        loss = closure(adam_optim2);
+      }
+      else
+      {
+        loss = closure(adam_optim3);
+      }
+      
+      // TODO
+      //- make a dict for all of this, do not recompile the code every time you change something trivial
+
+      //- info out to terminal
+      //- does not work on the cluster for some reason, rely on the loss.txt for info
+      if (iter % 10 == 0) 
+      {
+        std::cout << "  iter=" << iter << ", loss=" << std::setprecision(7) << loss<<" lr: "<<adam_optim1.defaults().get_lr()<<"\n";
+        // lossFile<<iter<<" "<<loss<<"\n";
+      }
+      if(iter % 5000 == 0)
+      {
+        std::cout<<"saving output..."<<"\n";
+        std::string modelName = "pNetSave" + std::to_string(mesh.ubT_);
+        torch::Tensor grid = torch::stack
+        (
+          {
+            torch::flatten(mesh.xyGrid[0]),
+            torch::flatten(mesh.xyGrid[1]),
+            torch::full_like(torch::flatten(mesh.xyGrid[1]),mesh.ubT_) //time values 
+          },1
+        );
+    
+        //- transfer grid to device
+        grid.to(mesh.device_);  
+
+        //- get predicted output, and from that get phaseField 
+        torch::Tensor C1 = mesh.net_->forward(grid);
+        std::string gridName = "gridSave" + std::to_string(mesh.ubT_);
+        std::string fieldsName = "fieldsSave" + std::to_string(mesh.ubT_);
+        //- write out input data for python to plot
+        writeTensorToFile(grid,gridName);
+        writeTensorToFile(C1,fieldsName); 
+   
+      }
+      //- stop training if target loss achieved
+      if (loss < mesh.net_->ABS_TOL) 
+      {
+        std::string modelName = "pNet" + std::to_string(mesh.ubT_) + ".pt"; // ".pt" is the extension of for pyTorch module
+        //- save model to file for post processing, indicate saved model is due to convergence
+        torch::save(mesh.net_,modelName);
+        //- update iter to get correct iter count
+        iter += 1;
+        //- update mesh for nex Time step in the time marching loop
+        break;
+      }
       iter += 1;
-      //- update netPrev_ field in the mesh class instance
-      // loadState(mesh.net_,mesh.netPrev_);
-     // std::cout<<iter<<std::endl;
-      break;
-	  }
-    iter += 1;
+    }
+    //- end profile clock
+    auto end_time = std::chrono::high_resolution_clock::now();
+    
+    //- get runTime for traning
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+   
+    //- info out runTime
+    std::cout << "Epoch execution time: " << duration.count() << " microseconds" << std::endl;
+    
+    //- Grid  for plotting final timeStep
+    torch::Tensor grid = torch::stack
+    (
+      {
+        torch::flatten(mesh.xyGrid[0]),
+        torch::flatten(mesh.xyGrid[1]),
+        torch::full_like(torch::flatten(mesh.xyGrid[1]),0.5) //time values 
+        //torch::flatten(mesh.mesh_[2])
+      },1
+    );
+    
+    //- get predicted output, and from that get phaseField 
+    torch::Tensor C1 = mesh.net_->forward(grid);
+    
+    //- file Names for the
+    std::string gridName = "grid" + std::to_string(mesh.ubT_);
+    std::string fieldsName = "fields" + std::to_string(mesh.ubT_);
+
+    //- write out input data for python to plot
+    writeTensorToFile(grid,gridName);
+    writeTensorToFile(C1,fieldsName); 
+    mesh.updateMesh();
   }
-  //- end profile clock
-  auto end_time = std::chrono::high_resolution_clock::now();
-  
-  //- get runTime for traning
-  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
- 
-  //- info out runTime
-  std::cout << "Execution time: " << duration.count() << " microseconds" << std::endl;
-  
-  //- for plotting final timeStep
-  torch::Tensor grid = torch::stack
-  (
-    {
-      torch::flatten(mesh.xyGrid[0]),
-      torch::flatten(mesh.xyGrid[1]),
-      torch::full_like(torch::flatten(mesh.xyGrid[1]),0.5) //time values 
-      //torch::flatten(mesh.mesh_[2])
-    },1
-  );
-	
-	//- transfer grid to device
-	grid.to(mesh.device_);  
-
-  //- get predicted output, and from that get phaseField 
-  torch::Tensor C1 = mesh.net_->forward(grid);
-  
-  //- write out input data for python to plot
-  writeTensorToFile(grid,"grid.txt");
-  writeTensorToFile(C1,"phaseField.txt"); 
-    return 0;
-
+  return 0;
 } 

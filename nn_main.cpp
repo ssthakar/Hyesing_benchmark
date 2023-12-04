@@ -46,17 +46,32 @@ void PinNetImpl::create_layers()
   {
     //- hiden layer name
     std::string layer_name = "fc_hidden" + std::to_string(i);
-    //- register each hidden layer
+    
+    //- create and register each hidden layer
     torch::nn::Linear linear_layer = register_module
     (
       layer_name,
       torch::nn::Linear(HIDDEN_LAYER_DIM,HIDDEN_LAYER_DIM)
     );
+
     //- intialize network parameters
     torch::nn::init::xavier_normal_(linear_layer->weight);
+    
     //- populate sequential with layers
     hidden_layers->push_back(linear_layer);
-    //- register activation functions 
+    
+    //- batch normalization layers 
+    std::string batchNormName = "fc_batchNorm" + std::to_string(i);
+    torch::nn::BatchNorm1d batchNormLayer = register_module
+    (
+      batchNormName,
+      torch::nn::BatchNorm1d(HIDDEN_LAYER_DIM)
+    );
+    
+    //- push back batch-normalization layer
+    hidden_layers->push_back(batchNormLayer);
+
+    //- create and register activation functions 
     hidden_layers->push_back
     (
       register_module
@@ -65,18 +80,8 @@ void PinNetImpl::create_layers()
         torch::nn::SiLU() // swish function X * RELU(X)
       )
     );
-    //- why ????
-    /*
-    hidden_layers->push_back
-    (
-      register_module
-      (
-        "batch norm",
-        torch::nn::BatchNorm1d()
-      )
-    );
-    */
   }
+
   //- register output layer
   output = register_module
   (
@@ -809,6 +814,7 @@ void mesh2D::updateMesh()
 {
   //- update the lower level of time grid
   lbT_ = lbT_ + TimeStep_;
+  ubT_ = ubT_ + TimeStep_;
   //- get new number of time steps in the current time domain
   Nt_ = (ubT_ - lbT_)/deltaT_ + 1;
   //- update tGrid
